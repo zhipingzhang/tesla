@@ -5,7 +5,6 @@ import com.hazelcast.core.HazelcastInstance;
 import io.github.tesla.common.dto.ServiceRouterDTO;
 import io.github.tesla.common.service.GatewayApiTextService;
 import io.github.tesla.common.service.SpringContextHolder;
-import io.github.tesla.filter.common.definition.CacheConstant;
 import io.github.tesla.filter.support.springcloud.SpringCloudDiscovery;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -48,7 +47,6 @@ public class AbstractPlugin {
     }
 
     public static ServiceRouterDTO getRouterByServiceId(String serviceId) {
-        CacheConstant.READ_WRITE_LOCK.readLock().lock();
         if (routerLocalCache.get(serviceId) == null) {
             routerLocalCache.put(serviceId, SpringContextHolder.getBean(GatewayApiTextService.class)
                     .loadGatewayServiceByServiceId(serviceId).getRouterDTO());
