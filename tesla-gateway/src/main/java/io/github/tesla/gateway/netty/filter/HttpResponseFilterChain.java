@@ -21,7 +21,7 @@ public class HttpResponseFilterChain {
     public static HttpResponse doFilter(NettyHttpServletRequest servletRequest, HttpResponse httpResponse,
         ChannelHandlerContext channelHandlerContext) {
         FilterCache cacheComponent = SpringContextHolder.getBean(FilterCache.class);
-        List<WafResponsePluginExecutor> wafResponses = cacheComponent.loadWafResonsePlugins();
+        List<WafResponsePluginExecutor> wafResponses = cacheComponent.loadWafResponsePlugins();
         // 执行waf过滤器
         for (Iterator<WafResponsePluginExecutor> it = wafResponses.iterator(); it.hasNext();) {
             WafResponsePluginExecutor plugin = it.next();
