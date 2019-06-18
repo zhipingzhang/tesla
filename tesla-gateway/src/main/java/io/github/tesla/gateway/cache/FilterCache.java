@@ -180,7 +180,7 @@ public class FilterCache {
         }
     }
 
-    private void doCacheAppKeyCache() throws Exception {
+    private void doCacheAppKeyCache() {
         List<AppKeyDTO> appKeyDTOS = gatewayApiTextService.loadEnabledAppKey();
         if (CollectionUtils.isEmpty(appKeyDTOS)) {
             return;
@@ -242,7 +242,7 @@ public class FilterCache {
         apiCacheList = tmpApiCacheList;
     }
 
-    private void doCacheWafCache() throws Exception {
+    private void doCacheWafCache() {
         List<GatewayWafDO> wafDOS = gatewayWafService.loadEnabledWaf();
         if (CollectionUtils.isEmpty(wafDOS)) {
             return;
