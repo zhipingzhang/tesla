@@ -45,21 +45,7 @@ public class HazelcastConfig {
         JoinConfig joinConfig = config.getNetworkConfig().getJoin();
         joinConfig.getMulticastConfig().setEnabled(false);
         joinConfig.getDiscoveryConfig().setDiscoveryServiceProvider(discoveryServiceProvider);
-        // init hazelcast cache
-        config.getMapConfigs().put(CacheConstant.CACHE_REFRESH_TIME,
-            new MapConfig(CacheConstant.CACHE_REFRESH_TIME).setBackupCount(1));
-        config.getListConfigs().put(CacheConstant.API_CACHE_LIST,
-            new ListConfig(CacheConstant.API_CACHE_LIST).setBackupCount(1));
-        config.getListConfigs().put(CacheConstant.WAF_REQUEST_CACHE_LIST,
-            new ListConfig(CacheConstant.WAF_REQUEST_CACHE_LIST).setBackupCount(1));
-        config.getListConfigs().put(CacheConstant.WAF_RESPONSE_CACHE_LIST,
-            new ListConfig(CacheConstant.WAF_RESPONSE_CACHE_LIST).setBackupCount(1));
-        config.getMapConfigs().put(CacheConstant.APP_KEY_CACHE_MAP,
-            new MapConfig(CacheConstant.APP_KEY_CACHE_MAP).setBackupCount(1));
-        config.getMapConfigs().put(CacheConstant.FILE_CACHE_MAP,
-            new MapConfig(CacheConstant.FILE_CACHE_MAP).setBackupCount(1));
-
-        return config;
+         return config;
     }
 
     @Bean

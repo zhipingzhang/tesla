@@ -1,8 +1,13 @@
 package io.github.tesla.filter.support.plugins;
 
+import com.google.common.cache.Cache;
+import com.google.common.cache.CacheBuilder;
 import io.github.tesla.filter.AbstractResponsePlugin;
 
 public class ResponsePluginMetadata extends FilterMetadata {
+
+    private static final Cache<Class<? extends AbstractResponsePlugin>, Object> INSTANCE_CACHE =
+            CacheBuilder.newBuilder().weakKeys().weakValues().build();
 
     protected Class<? extends AbstractResponsePlugin> filterClass;
 
@@ -15,6 +20,6 @@ public class ResponsePluginMetadata extends FilterMetadata {
     }
 
     public <T> T getInstance() throws Exception {
-        return (T)getFilterClass().getDeclaredConstructor().newInstance();
+        return (T) INSTANCE_CACHE.get(filterClass, () -> getFilterClass().getDeclaredConstructor().newInstance());
     }
 }
