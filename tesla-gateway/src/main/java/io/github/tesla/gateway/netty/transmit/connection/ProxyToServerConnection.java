@@ -384,7 +384,6 @@ public class ProxyToServerConnection extends ProxyConnection<HttpResponse> {
             connect = cb.connect(remoteAddress);
         }
         become(CONNECTING);
-        LOG.error("init proxyToServerChannel " + connect.channel().toString());
         connect.addListener((ChannelFutureListener) future -> {
             try {
                 if (future.isSuccess()) {
