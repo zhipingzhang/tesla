@@ -1,23 +1,6 @@
 package io.github.tesla.gateway.netty.transmit.connection;
 
-import static io.github.tesla.gateway.netty.transmit.ConnectionState.*;
-
-import java.io.ByteArrayInputStream;
-import java.io.IOException;
-import java.net.InetSocketAddress;
-import java.net.UnknownHostException;
-import java.security.KeyStore;
-import java.util.concurrent.RejectedExecutionException;
-
-import javax.net.ssl.SSLProtocolException;
-import javax.net.ssl.TrustManagerFactory;
-
-import org.apache.commons.lang3.StringUtils;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-
 import com.google.common.net.HostAndPort;
-
 import io.github.tesla.filter.AbstractPlugin;
 import io.github.tesla.filter.service.definition.PluginDefinition;
 import io.github.tesla.filter.support.enums.YesOrNoEnum;
@@ -25,15 +8,10 @@ import io.github.tesla.filter.utils.ProxyUtils;
 import io.github.tesla.gateway.netty.HttpFiltersAdapter;
 import io.github.tesla.gateway.netty.HttpProxyServer;
 import io.github.tesla.gateway.netty.transmit.ConnectionState;
-import io.github.tesla.gateway.netty.transmit.flow.ConnectionFlow;
-import io.github.tesla.gateway.netty.transmit.flow.ConnectionFlowStep;
 import io.netty.bootstrap.Bootstrap;
 import io.netty.buffer.ByteBuf;
-import io.netty.channel.Channel;
+import io.netty.channel.*;
 import io.netty.channel.ChannelHandler.Sharable;
-import io.netty.channel.ChannelInitializer;
-import io.netty.channel.ChannelOption;
-import io.netty.channel.ChannelPipeline;
 import io.netty.channel.socket.nio.NioSocketChannel;
 import io.netty.handler.codec.http.*;
 import io.netty.handler.ssl.SslContext;
@@ -42,7 +20,20 @@ import io.netty.handler.timeout.IdleStateHandler;
 import io.netty.handler.traffic.GlobalTrafficShapingHandler;
 import io.netty.util.AttributeKey;
 import io.netty.util.ReferenceCounted;
-import io.netty.util.concurrent.Future;
+import org.apache.commons.lang3.StringUtils;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import javax.net.ssl.SSLProtocolException;
+import javax.net.ssl.TrustManagerFactory;
+import java.io.ByteArrayInputStream;
+import java.io.IOException;
+import java.net.InetSocketAddress;
+import java.net.UnknownHostException;
+import java.security.KeyStore;
+import java.util.concurrent.RejectedExecutionException;
+
+import static io.github.tesla.gateway.netty.transmit.ConnectionState.*;
 
 /**
  * <p>
@@ -52,16 +43,13 @@ import io.netty.util.concurrent.Future;
  *
  * <p>
  * Connecting a {@link ProxyToServerConnection} can involve more than just connecting the underlying {@link Channel}. In
- * particular, the connection may use encryption (i.e. TLS) and it may also establish an HTTP CONNECT tunnel. The
- * various steps involved in fully establishing a connection are encapsulated in the property {@link #connectionFlow},
- * which is initialized in {@link #initializeConnectionFlow()}.
+ * particular, the connection may use encryption (i.e. TLS) and it may also establish an HTTP CONNECT tunnel.
  * </p>
  */
 @Sharable
 public class ProxyToServerConnection extends ProxyConnection<HttpResponse> {
     private static final AttributeKey<Object> KEY_CONTEXT = AttributeKey.valueOf("SW_CONTEXT");
     private final ClientToProxyConnection clientConnection;
-    private final ProxyToServerConnection serverConnection = this;
     private final String serverHostAndPort;
     private final boolean enableSSL;
     private final SslContext sslContext;
@@ -81,11 +69,7 @@ public class ProxyToServerConnection extends ProxyConnection<HttpResponse> {
      */
     private volatile HttpFiltersAdapter currentFilters;
     /**
-     * Encapsulates the flow for establishing a connection, which can vary depending on how things are configured.
-     */
-    private volatile ConnectionFlow connectionFlow;
-    /**
-     * Disables SNI when initializing connection flow in {@link #initializeConnectionFlow()}. This value is set to true
+     * This value is set to true
      * when retrying a connection without SNI to work around Java's SNI handling issue (see
      * {@link #connectionFailed(Throwable)}).
      */
@@ -111,15 +95,15 @@ public class ProxyToServerConnection extends ProxyConnection<HttpResponse> {
     private volatile GlobalTrafficShapingHandler trafficHandler;
 
     public static ProxyToServerConnection create(HttpProxyServer proxyServer, ClientToProxyConnection clientConnection,
-        String serverHostAndPort, HttpFiltersAdapter initialFilters, HttpRequest initialHttpRequest,
-        GlobalTrafficShapingHandler globalTrafficShapingHandler) throws UnknownHostException {
+                                                 String serverHostAndPort, HttpFiltersAdapter initialFilters, HttpRequest initialHttpRequest,
+                                                 GlobalTrafficShapingHandler globalTrafficShapingHandler) throws UnknownHostException {
         return new ProxyToServerConnection(proxyServer, clientConnection, serverHostAndPort, initialFilters,
             globalTrafficShapingHandler, initialHttpRequest);
     }
 
     private ProxyToServerConnection(HttpProxyServer proxyServer, ClientToProxyConnection clientConnection,
-        String serverHostAndPort, HttpFiltersAdapter initialFilters,
-        GlobalTrafficShapingHandler globalTrafficShapingHandler, HttpRequest initialHttpRequest)
+                                    String serverHostAndPort, HttpFiltersAdapter initialFilters,
+                                    GlobalTrafficShapingHandler globalTrafficShapingHandler, HttpRequest initialHttpRequest)
         throws UnknownHostException {
         super(DISCONNECTED, proxyServer);
         this.clientConnection = clientConnection;
@@ -156,20 +140,6 @@ public class ProxyToServerConnection extends ProxyConnection<HttpResponse> {
             }
         }
         return null;
-    }
-
-    /***************************************************************************
-     * Reading
-     **************************************************************************/
-
-    @Override
-    public void read(Object msg) {
-        if (isConnecting()) {
-            LOG.debug("In the middle of connecting, forwarding message to connection flow: {}", msg);
-            this.connectionFlow.read(msg);
-        } else {
-            super.read(msg);
-        }
     }
 
     @Override
@@ -268,31 +238,13 @@ public class ProxyToServerConnection extends ProxyConnection<HttpResponse> {
             connectAndWrite((HttpRequest)msg);
         } else {
             if (isConnecting()) {
-                synchronized (connectLock) {
-                    if (isConnecting()) {
-                        LOG.debug(
-                            "Attempted to write while still in the process of connecting, waiting for connection.");
-                        clientConnection.stopReading();
-                        try {
-                            connectLock.wait(30000);
-                        } catch (InterruptedException ie) {
-                            LOG.warn("Interrupted while waiting for connect monitor");
-                        }
-                    }
-                }
-            }
-            if (isConnecting() || getCurrentState().isDisconnectingOrDisconnected()) {
-                LOG.debug(
-                    "Connection failed or timed out while waiting to write message to server. Message will be discarded: {}",
-                    msg);
+                clientConnection.serverConnectionFailed(this, new RuntimeException("服务端连接状态不正确"));
                 return;
             }
             LOG.debug("Using existing connection to: {}", remoteAddress);
             doWrite(msg);
         }
     }
-
-    ;
 
     @Override
     public void writeHttp(HttpObject httpObject) {
@@ -332,18 +284,6 @@ public class ProxyToServerConnection extends ProxyConnection<HttpResponse> {
     }
 
     @Override
-    public void becameSaturated() {
-        super.becameSaturated();
-        this.clientConnection.serverBecameSaturated(this);
-    }
-
-    @Override
-    public void becameWritable() {
-        super.becameWritable();
-        this.clientConnection.serverBecameWriteable(this);
-    }
-
-    @Override
     public void timedOut() {
         super.timedOut();
         clientConnection.timedOut(this);
@@ -352,7 +292,9 @@ public class ProxyToServerConnection extends ProxyConnection<HttpResponse> {
     @Override
     public void disconnected() {
         super.disconnected();
-        clientConnection.serverDisconnected(this);
+        if (clientConnection != null) {
+            clientConnection.serverDisconnected(this);
+        }
     }
 
     @Override
@@ -389,10 +331,6 @@ public class ProxyToServerConnection extends ProxyConnection<HttpResponse> {
         return initialRequest;
     }
 
-    @Override
-    public HttpFiltersAdapter getHttpFiltersFromProxyServer(HttpRequest httpRequest) {
-        return currentFilters;
-    }
 
     /***************************************************************************
      * Private Implementation
@@ -419,7 +357,7 @@ public class ProxyToServerConnection extends ProxyConnection<HttpResponse> {
     }
 
     /**
-     * Configures the connection to the upstream server and begins the {@link ConnectionFlow}.
+     * Configures the connection to the upstream server.
      *
      * @param initialRequest
      *            the current HTTP request being handled
@@ -427,54 +365,40 @@ public class ProxyToServerConnection extends ProxyConnection<HttpResponse> {
     private void connectAndWrite(HttpRequest initialRequest) {
         LOG.debug("Starting new connection to: {}", remoteAddress);
         this.initialRequest = initialRequest;
-        initializeConnectionFlow();
-        connectionFlow.start();
-    }
-
-    /**
-     * This method initializes our {@link ConnectionFlow} based on however this connection has been configured. If the
-     * {@link #disableSni} value is true, this method will not pass peer information to the MitmManager when handling
-     * CONNECTs.
-     */
-    private void initializeConnectionFlow() {
-        this.connectionFlow = new ConnectionFlow(clientConnection, this, connectLock).then(connectChannel);
-        if (ProxyUtils.isCONNECT(initialRequest)) {
-            connectionFlow.then(serverConnection.StartTunneling).then(clientConnection.RespondCONNECTSuccessful)
-                .then(clientConnection.StartTunneling);
-        }
-    }
-
-    /**
-     * Opens the socket connection.
-     */
-    private ConnectionFlowStep connectChannel = new ConnectionFlowStep(this, CONNECTING) {
-        @Override
-        public boolean shouldExecuteOnEventLoop() {
-            return false;
-        }
-
-        @Override
-        public Future<?> execute() {
-            Bootstrap cb = new Bootstrap().group(proxyServer.getProxyToServerWorkerFor())//
+        Bootstrap cb = new Bootstrap().group(clientConnection.ctx.channel().eventLoop())
                 .channel(NioSocketChannel.class)
-                .option(ChannelOption.CONNECT_TIMEOUT_MILLIS, proxyServer.getConnectTimeout())
-                .handler(new ChannelInitializer<Channel>() {
+                .option(ChannelOption.CONNECT_TIMEOUT_MILLIS, proxyServer.getConnectTimeout()).option(ChannelOption.TCP_NODELAY, true)
+                .handler(new ChannelInitializer<>() {
+                    @Override
                     public void initChannel(Channel ch) throws Exception {
                         Object tracingContext =
-                            ProxyToServerConnection.this.clientConnection.channel.attr(KEY_CONTEXT).get();
+                                ProxyToServerConnection.this.clientConnection.channel.attr(KEY_CONTEXT).get();
                         ch.attr(KEY_CONTEXT).set(tracingContext);
-                        initChannelPipeline(ch.pipeline(), initialRequest);
+                        initChannelPipeline(ch.pipeline());
                     }
-
-                ;
                 });
-            if (localAddress != null) {
-                return cb.connect(remoteAddress, localAddress);
-            } else {
-                return cb.connect(remoteAddress);
-            }
+        ChannelFuture connect;
+        if (localAddress != null) {
+            connect = cb.connect(remoteAddress, localAddress);
+        } else {
+            connect = cb.connect(remoteAddress);
         }
-    };
+        become(CONNECTING);
+        LOG.error("init proxyToServerChannel " + connect.channel().toString());
+        connect.addListener((ChannelFutureListener) future -> {
+            try {
+                if (future.isSuccess()) {
+                    doWrite(initialRequest);
+                    become(AWAITING_INITIAL);
+                } else {
+                    clientConnection.serverConnectionFailed(this, future.cause());
+                }
+            } catch (Throwable cause) {
+                clientConnection.serverConnectionFailed(this, cause);
+            }
+
+        });
+    }
 
     public boolean connectionFailed(Throwable cause) throws UnknownHostException {
         if (!disableSni && cause instanceof SSLProtocolException) {
@@ -519,7 +443,7 @@ public class ProxyToServerConnection extends ProxyConnection<HttpResponse> {
         this.localAddress = proxyServer.getLocalAddress();
     }
 
-    private void initChannelPipeline(ChannelPipeline pipeline, HttpRequest httpRequest) {
+    private void initChannelPipeline(ChannelPipeline pipeline) {
         if (enableSSL && sslContext != null) {
             pipeline.addLast(sslContext.newHandler(pipeline.channel().alloc(), remoteAddress.getHostName(),
                 remoteAddress.getPort()));
@@ -538,19 +462,6 @@ public class ProxyToServerConnection extends ProxyConnection<HttpResponse> {
         pipeline.addLast("handler", this);
     }
 
-    public void connectionSucceeded(boolean shouldForwardInitialRequest) {
-        become(AWAITING_INITIAL);
-        clientConnection.serverConnectionSucceeded(this, shouldForwardInitialRequest);
-        if (shouldForwardInitialRequest) {
-            LOG.debug("Writing initial request: {}", initialRequest);
-            write(initialRequest);
-        } else {
-            LOG.debug("Dropping initial request: {}", initialRequest);
-        }
-        if (initialRequest instanceof ReferenceCounted) {
-            ((ReferenceCounted)initialRequest).release();
-        }
-    }
 
     public static InetSocketAddress addressFor(String hostAndPort, HttpProxyServer proxyServer, boolean useSSL)
         throws UnknownHostException {

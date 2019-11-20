@@ -1,13 +1,8 @@
 package io.github.tesla.gateway.netty.transmit.connection;
 
-import static io.github.tesla.gateway.netty.transmit.ConnectionState.*;
-
 import io.github.tesla.filter.utils.ProxyUtils;
-import io.github.tesla.gateway.netty.HttpFiltersAdapter;
 import io.github.tesla.gateway.netty.HttpProxyServer;
 import io.github.tesla.gateway.netty.transmit.ConnectionState;
-import io.github.tesla.gateway.netty.transmit.flow.ConnectionFlow;
-import io.github.tesla.gateway.netty.transmit.flow.ConnectionFlowStep;
 import io.github.tesla.gateway.netty.transmit.support.ProxyConnectionLogger;
 import io.netty.buffer.ByteBuf;
 import io.netty.buffer.Unpooled;
@@ -16,8 +11,9 @@ import io.netty.handler.codec.http.*;
 import io.netty.handler.timeout.IdleStateEvent;
 import io.netty.util.ReferenceCounted;
 import io.netty.util.concurrent.Future;
-import io.netty.util.concurrent.GenericFutureListener;
 import io.netty.util.concurrent.Promise;
+
+import static io.github.tesla.gateway.netty.transmit.ConnectionState.*;
 
 /**
  * <p>
@@ -48,7 +44,7 @@ import io.netty.util.concurrent.Promise;
  *
  * <p>
  * By default, incoming data on the underlying channel is automatically read and passed to the {@link #read(Object)}
- * method. Reading can be stopped and resumed using {@link #stopReading()} and {@link #resumeReading()}.
+ * method.
  * </p>
  *
  * @param <I>
@@ -71,8 +67,6 @@ public abstract class ProxyConnection<I extends HttpObject> extends SimpleChanne
      *            the state in which this connection starts out
      * @param proxyServer
      *            the {@link HttpProxyServer} in which we're running
-     * @param runsAsSslClient
-     *            determines whether this connection acts as an SSL client or server (determines who does the handshake)
      */
     public ProxyConnection(ConnectionState initialState, HttpProxyServer proxyServer) {
         become(initialState);
@@ -233,9 +227,7 @@ public abstract class ProxyConnection<I extends HttpObject> extends SimpleChanne
      **************************************************************************/
 
     /**
-     * This method is called as soon as the underlying {@link Channel} is connected. Note that for proxies with complex
-     * {@link ConnectionFlow}s that include SSL handshaking and other such things, just because the {@link Channel} is
-     * connected doesn't mean that our connection is fully established.
+     * This method is called as soon as the underlying {@link Channel} is connected.
      */
     public void connected() {
         LOG.debug("Connected");
@@ -256,38 +248,6 @@ public abstract class ProxyConnection<I extends HttpObject> extends SimpleChanne
         disconnect();
     }
 
-    /**
-     * <p>
-     * Enables tunneling on this connection by dropping the HTTP related encoders and decoders, as well as idle timers.
-     * </p>
-     *
-     * <p>
-     * Note - the work is done on the {@link ChannelHandlerContext}'s executor because
-     * {@link ChannelPipeline#remove(String)} can deadlock if called directly.
-     * </p>
-     */
-    public ConnectionFlowStep StartTunneling = new ConnectionFlowStep(this, NEGOTIATING_CONNECT) {
-        @Override
-        public boolean shouldSuppressInitialRequest() {
-            return true;
-        }
-
-        public Future<?> execute() {
-            try {
-                ChannelPipeline pipeline = ctx.pipeline();
-                if (pipeline.get("encoder") != null) {
-                    pipeline.remove("encoder");
-                }
-                if (pipeline.get("decoder") != null) {
-                    pipeline.remove("decoder");
-                }
-                tunneling = true;
-                return channel.newSucceededFuture();
-            } catch (Throwable t) {
-                return channel.newFailedFuture(t);
-            }
-        }
-    };
 
     /**
      * Enables decompression and aggregation of content, which is useful for certain types of filtering activity.
@@ -334,27 +294,18 @@ public abstract class ProxyConnection<I extends HttpObject> extends SimpleChanne
             return null;
         } else {
             final Promise<Void> promise = channel.newPromise();
-            writeToChannel(Unpooled.EMPTY_BUFFER).addListener(new GenericFutureListener<Future<? super Void>>() {
-                @Override
-                public void operationComplete(Future<? super Void> future) throws Exception {
-                    closeChannel(promise);
-                }
-            });
+            writeToChannel(Unpooled.EMPTY_BUFFER).addListener(future -> closeChannel(promise));
             return promise;
         }
     }
 
     private void closeChannel(final Promise<Void> promise) {
-        channel.close().addListener(new GenericFutureListener<Future<? super Void>>() {
-            public void operationComplete(Future<? super Void> future) throws Exception {
-                if (future.isSuccess()) {
-                    promise.setSuccess(null);
-                } else {
-                    promise.setFailure(future.cause());
-                }
+        channel.close().addListener(future -> {
+            if (future.isSuccess()) {
+                promise.setSuccess(null);
+            } else {
+                promise.setFailure(future.cause());
             }
-
-            ;
         });
     }
 
@@ -378,12 +329,12 @@ public abstract class ProxyConnection<I extends HttpObject> extends SimpleChanne
     }
 
     /**
-     * If this connection is currently in the process of going through a {@link ConnectionFlow}, this will return true.
+     * this will return true.
      *
      * @return
      */
     public boolean isConnecting() {
-        return currentState.isPartOfConnectionFlow();
+        return currentState == CONNECTING;
     }
 
     /**
@@ -403,39 +354,6 @@ public abstract class ProxyConnection<I extends HttpObject> extends SimpleChanne
         return tunneling;
     }
 
-    /**
-     * Call this to stop reading.
-     */
-    public void stopReading() {
-        LOG.debug("Stopped reading");
-        this.channel.config().setAutoRead(false);
-    }
-
-    /**
-     * Call this to resume reading.
-     */
-    public void resumeReading() {
-        LOG.debug("Resumed reading");
-        this.channel.config().setAutoRead(true);
-    }
-
-    /**
-     * Request the ProxyServer for Filters.
-     * <p>
-     * By default, no-op filters are returned by DefaultHttpProxyServer. Subclasses of ProxyConnection can change this
-     * behaviour.
-     *
-     * @param httpRequest
-     *            Filter attached to the give HttpRequest (if any)
-     * @return
-     */
-    public HttpFiltersAdapter getHttpFiltersFromProxyServer(HttpRequest httpRequest) {
-        return proxyServer.getFiltersSource().filterRequest(httpRequest, ctx);
-    }
-
-    public ProxyConnectionLogger getLOG() {
-        return LOG;
-    }
 
     /***************************************************************************
      * Adapting the Netty API

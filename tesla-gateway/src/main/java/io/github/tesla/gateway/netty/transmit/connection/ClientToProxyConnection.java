@@ -1,32 +1,12 @@
 package io.github.tesla.gateway.netty.transmit.connection;
 
-import static io.github.tesla.gateway.netty.transmit.ConnectionState.*;
-import static io.github.tesla.gateway.netty.transmit.support.ServerGroup.DEFAULT_INCOMING_WORKER_THREADS;
-
-import java.io.IOException;
-import java.net.InetSocketAddress;
-import java.net.UnknownHostException;
-import java.util.*;
-import java.util.concurrent.Callable;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
-import java.util.concurrent.RejectedExecutionException;
-import java.util.concurrent.atomic.AtomicInteger;
-import java.util.regex.Pattern;
-
-import org.apache.commons.lang3.StringUtils;
-import org.apache.commons.lang3.tuple.Pair;
-
 import com.google.common.collect.Lists;
-
 import io.github.tesla.filter.service.definition.PluginDefinition;
 import io.github.tesla.filter.utils.NetworkUtil;
 import io.github.tesla.filter.utils.ProxyUtils;
 import io.github.tesla.gateway.netty.HttpFiltersAdapter;
 import io.github.tesla.gateway.netty.HttpProxyServer;
-import io.github.tesla.gateway.netty.transmit.CategorizedThreadFactory;
 import io.github.tesla.gateway.netty.transmit.ConnectionState;
-import io.github.tesla.gateway.netty.transmit.flow.ConnectionFlowStep;
 import io.netty.buffer.ByteBuf;
 import io.netty.buffer.Unpooled;
 import io.netty.channel.Channel;
@@ -36,7 +16,19 @@ import io.netty.handler.timeout.IdleStateHandler;
 import io.netty.handler.traffic.GlobalTrafficShapingHandler;
 import io.netty.util.AsciiString;
 import io.netty.util.CharsetUtil;
-import io.netty.util.concurrent.Future;
+import org.apache.commons.lang3.StringUtils;
+import org.apache.commons.lang3.tuple.Pair;
+import org.springframework.util.CollectionUtils;
+
+import java.io.IOException;
+import java.net.InetSocketAddress;
+import java.net.UnknownHostException;
+import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.RejectedExecutionException;
+import java.util.regex.Pattern;
+
+import static io.github.tesla.gateway.netty.transmit.ConnectionState.*;
 
 /**
  * <p>
@@ -63,31 +55,14 @@ public class ClientToProxyConnection extends ProxyConnection<HttpRequest> {
         HttpHeaderNames.TRANSFER_ENCODING.toString().toLowerCase(Locale.US);
     private static final Pattern HTTP_SCHEME = Pattern.compile("^http://.*", Pattern.CASE_INSENSITIVE);
 
-    private static final ExecutorService oneToManyThreadPool = Executors.newFixedThreadPool(
-        DEFAULT_INCOMING_WORKER_THREADS * 2, new CategorizedThreadFactory("Tesla", "ProxySendRequest", 1));
-
     /**
      * Keep track of all ProxyToServerConnections by host+port.
      */
     private final Map<String, ProxyToServerConnection> oneToOneServerConnectionsByHostAndPort =
-        Collections.synchronizedMap(new WeakHashMap<String, ProxyToServerConnection>());
+            new ConcurrentHashMap<>();
 
     private final Map<String, ProxyToServerConnection> oneToManyServerConnectionsByHostAndPort =
-        Collections.synchronizedMap(new WeakHashMap<String, ProxyToServerConnection>());
-    /**
-     * Keep track of how many servers are currently in the process of connecting.
-     */
-    private final AtomicInteger numberOfCurrentlyConnectingServers = new AtomicInteger(0);
-
-    /**
-     * Keep track of how many servers are currently connected.
-     */
-    private final AtomicInteger numberOfCurrentlyConnectedServers = new AtomicInteger(0);
-
-    /**
-     * Keep track of how many times we were able to reuse a connection.
-     */
-    private final AtomicInteger numberOfReusedServerConnections = new AtomicInteger(0);
+            new ConcurrentHashMap<>();
 
     private final GlobalTrafficShapingHandler globalTrafficShapingHandler;
 
@@ -118,7 +93,7 @@ public class ClientToProxyConnection extends ProxyConnection<HttpRequest> {
     private volatile HttpRequest currentRequest;
 
     public ClientToProxyConnection(final HttpProxyServer proxyServer, ChannelPipeline pipeline,
-        GlobalTrafficShapingHandler globalTrafficShapingHandler) {
+                                   GlobalTrafficShapingHandler globalTrafficShapingHandler) {
         super(AWAITING_INITIAL, proxyServer);
         initChannelPipeline(pipeline);
         this.globalTrafficShapingHandler = globalTrafficShapingHandler;
@@ -207,22 +182,12 @@ public class ClientToProxyConnection extends ProxyConnection<HttpRequest> {
             for (Pair<String, HttpRequest> requestPair : splitRequests) {
                 currentRequestList.add(requestPair.getValue());
             }
-            List<Callable<ConnectionState>> oneToManyTasks = new ArrayList<Callable<ConnectionState>>();
+            boolean success = true;
             for (Pair<String, HttpRequest> requestPair : splitRequests) {
                 if (StringUtils.isBlank(requestPair.getKey())) {
                     continue;
                 }
-                oneToManyTasks.add(new Callable<ConnectionState>() {
-                    @Override
-                    public ConnectionState call() throws Exception {
-                        return doReadHTTPInitialInternal(requestPair.getValue(), requestPair.getKey());
-                    }
-                });
-            }
-            List<java.util.concurrent.Future<ConnectionState>> results = oneToManyThreadPool.invokeAll(oneToManyTasks);
-            boolean success = true;
-            for (java.util.concurrent.Future<ConnectionState> state : results) {
-                if (state.get() == DISCONNECT_REQUESTED) {
+                if (doReadHTTPInitialInternal(requestPair.getValue(), requestPair.getKey()) == DISCONNECT_REQUESTED) {
                     success = false;
                     break;
                 }
@@ -230,7 +195,8 @@ public class ClientToProxyConnection extends ProxyConnection<HttpRequest> {
             if (success) {
                 return AWAITING_INITIAL;
             } else {
-                LOG.error("One to Many request,there is one server can not connection,request is :" + splitRequests);
+                String cause = "One to Many request,there is one server can not connection,request is :" + splitRequests;
+                LOG.error(cause);
                 writeBadGateway(httpRequest);
                 return DISCONNECT_REQUESTED;
             }
@@ -265,7 +231,6 @@ public class ClientToProxyConnection extends ProxyConnection<HttpRequest> {
                 if (currentServerConnection == null) {
                     LOG.debug("Unable to create server connection, probably no chained proxies available");
                     boolean keepAlive = writeBadGateway(httpRequest);
-                    resumeReading();
                     if (keepAlive) {
                         return AWAITING_INITIAL;
                     } else {
@@ -283,16 +248,12 @@ public class ClientToProxyConnection extends ProxyConnection<HttpRequest> {
             } catch (UnknownHostException uhe) {
                 LOG.info("Bad Host {}", httpRequest.uri());
                 boolean keepAlive = writeBadGateway(httpRequest);
-                resumeReading();
                 if (keepAlive) {
                     return AWAITING_INITIAL;
                 } else {
                     return DISCONNECT_REQUESTED;
                 }
             }
-        } else {
-            LOG.debug("Reusing existing server connection: {}", currentServerConnection);
-            numberOfReusedServerConnections.incrementAndGet();
         }
         currentServerConnectionList.add(currentServerConnection);
         modifyRequestHeadersToReflectProxying(httpRequest);
@@ -388,7 +349,7 @@ public class ClientToProxyConnection extends ProxyConnection<HttpRequest> {
      *            the data with which to respond
      */
     public void respond(ProxyToServerConnection serverConnection, HttpFiltersAdapter filters,
-        HttpRequest currentHttpRequest, HttpResponse currentHttpResponse, HttpObject httpObject) {
+                        HttpRequest currentHttpRequest, HttpResponse currentHttpResponse, HttpObject httpObject) {
         this.currentRequest = null;
         httpObject = filters.serverToProxyResponse(httpObject);
         if (httpObject == null) {
@@ -457,28 +418,6 @@ public class ClientToProxyConnection extends ProxyConnection<HttpRequest> {
         this.releaseAndInitCurrentRequestResource();
     }
 
-    /***************************************************************************
-     * Connection Lifecycle
-     **************************************************************************/
-
-    /**
-     * Tells the Client that its HTTP CONNECT request was successful.
-     */
-    protected ConnectionFlowStep RespondCONNECTSuccessful = new ConnectionFlowStep(this, NEGOTIATING_CONNECT) {
-        @Override
-        public boolean shouldSuppressInitialRequest() {
-            return true;
-        }
-
-        public Future<?> execute() {
-            LOG.debug("Responding with CONNECT successful");
-            HttpResponse response = ProxyUtils.createFullHttpResponse(HttpVersion.HTTP_1_1, CONNECTION_ESTABLISHED);
-            response.headers().set(HttpHeaderNames.CONNECTION, HttpHeaderValues.KEEP_ALIVE);
-            ProxyUtils.addVia(response, proxyServer.getProxyAlias());
-            return writeToChannel(response);
-        }
-    };
-
     /**
      * On connect of the client, start waiting for an initial {@link HttpRequest}.
      */
@@ -530,31 +469,6 @@ public class ClientToProxyConnection extends ProxyConnection<HttpRequest> {
     }
 
     /**
-     * Called when {@link ProxyToServerConnection} starts its connection flow.
-     *
-     * @param serverConnection
-     */
-    public void serverConnectionFlowStarted(ProxyToServerConnection serverConnection) {
-        stopReading();
-        this.numberOfCurrentlyConnectingServers.incrementAndGet();
-    }
-
-    /**
-     * If the {@link ProxyToServerConnection} completes its connection lifecycle successfully, this method is called to
-     * let us know about it.
-     *
-     * @param serverConnection
-     * @param shouldForwardInitialRequest
-     */
-    public void serverConnectionSucceeded(ProxyToServerConnection serverConnection,
-        boolean shouldForwardInitialRequest) {
-        LOG.debug("Connection to server succeeded: {}", serverConnection.getRemoteAddress());
-        resumeReadingIfNecessary();
-        become(shouldForwardInitialRequest ? getCurrentState() : AWAITING_INITIAL);
-        numberOfCurrentlyConnectedServers.incrementAndGet();
-    }
-
-    /**
      * If the {@link ProxyToServerConnection} fails to complete its connection lifecycle successfully, this method is
      * called to let us know about it.
      *
@@ -568,25 +482,21 @@ public class ClientToProxyConnection extends ProxyConnection<HttpRequest> {
      * </ol>
      *
      * @param serverConnection
-     * @param lastStateBeforeFailure
      * @param cause
      *            what caused the failure
      * @return true if we're falling back to a another chained proxy (or direct connection) and trying again
      */
-    public boolean serverConnectionFailed(ProxyToServerConnection serverConnection,
-        ConnectionState lastStateBeforeFailure, Throwable cause) {
-        resumeReadingIfNecessary();
+    public boolean serverConnectionFailed(ProxyToServerConnection serverConnection, Throwable cause) {
         HttpRequest initialRequest = serverConnection.getInitialRequest();
         try {
             boolean retrying = serverConnection.connectionFailed(cause);
             if (retrying) {
                 LOG.debug(
-                    "Failed to connect to upstream server or chained proxy. Retrying connection. Last state before failure: {}",
-                    lastStateBeforeFailure, cause);
+                    "Failed to connect to upstream server or chained proxy. Retrying connection. ", cause);
                 return true;
             } else {
-                LOG.debug("Connection to upstream server or chained proxy failed: {}.  Last state before failure: {}",
-                    serverConnection.getRemoteAddress(), lastStateBeforeFailure, cause);
+                LOG.debug("Connection to upstream server or chained proxy failed: {}. ",
+                    serverConnection.getRemoteAddress(), cause);
                 connectionFailedUnrecoverably(initialRequest, serverConnection);
                 return false;
             }
@@ -609,12 +519,6 @@ public class ClientToProxyConnection extends ProxyConnection<HttpRequest> {
         }
     }
 
-    private void resumeReadingIfNecessary() {
-        if (this.numberOfCurrentlyConnectingServers.decrementAndGet() == 0) {
-            LOG.debug("All servers have finished attempting to connect, resuming reading from client.");
-            resumeReading();
-        }
-    }
 
     /***************************************************************************
      * Other Lifecycle
@@ -627,70 +531,9 @@ public class ClientToProxyConnection extends ProxyConnection<HttpRequest> {
      * @param serverConnection
      */
     public void serverDisconnected(ProxyToServerConnection serverConnection) {
-        numberOfCurrentlyConnectedServers.decrementAndGet();
+        clearServerConnection(serverConnection);
         if (isTunneling()) {
             disconnect();
-        }
-    }
-
-    /**
-     * When the ClientToProxyConnection becomes saturated, stop reading on all associated ProxyToServerConnections.
-     */
-    @Override
-    public synchronized void becameSaturated() {
-        super.becameSaturated();
-        for (ProxyToServerConnection serverConnection : oneToOneServerConnectionsByHostAndPort.values()) {
-            synchronized (serverConnection) {
-                if (this.isSaturated()) {
-                    serverConnection.stopReading();
-                }
-            }
-        }
-    }
-
-    /**
-     * When the ClientToProxyConnection becomes writable, resume reading on all associated ProxyToServerConnections.
-     */
-    @Override
-    public synchronized void becameWritable() {
-        super.becameWritable();
-        for (ProxyToServerConnection serverConnection : oneToOneServerConnectionsByHostAndPort.values()) {
-            synchronized (serverConnection) {
-                if (!this.isSaturated()) {
-                    serverConnection.resumeReading();
-                }
-            }
-        }
-    }
-
-    /**
-     * When a server becomes saturated, we stop reading from the client.
-     *
-     * @param serverConnection
-     */
-    public synchronized void serverBecameSaturated(ProxyToServerConnection serverConnection) {
-        if (serverConnection.isSaturated()) {
-            LOG.info("Connection to server became saturated, stopping reading");
-            stopReading();
-        }
-    }
-
-    /**
-     * When a server becomes writeable, we check to see if all servers are writeable and if they are, we resume reading.
-     *
-     * @param serverConnection
-     */
-    public synchronized void serverBecameWriteable(ProxyToServerConnection serverConnection) {
-        boolean anyServersSaturated = false;
-        for (ProxyToServerConnection otherServerConnection : oneToOneServerConnectionsByHostAndPort.values()) {
-            if (otherServerConnection.isSaturated()) {
-                anyServersSaturated = true;
-                break;
-            }
-        }
-        if (!anyServersSaturated) {
-            LOG.info("All server connections writeable, resuming reading");
-            resumeReading();
         }
     }
 
@@ -727,7 +570,7 @@ public class ClientToProxyConnection extends ProxyConnection<HttpRequest> {
      * write (Outbound) handlers in descending ordering.
      * <p>
      * Regarding the Javadoc of {@link HttpObjectAggregator} it's needed to have the {@link HttpResponseEncoder} or
-     * {@link io.netty.handler.codec.http.HttpRequestEncoder} before the {@link HttpObjectAggregator} in the
+     * {@link HttpRequestEncoder} before the {@link HttpObjectAggregator} in the
      * {@link ChannelPipeline}.
      *
      * @param pipeline
@@ -750,7 +593,7 @@ public class ClientToProxyConnection extends ProxyConnection<HttpRequest> {
      * This method takes care of closing client to proxy and/or proxy to server connections after finishing a write.
      */
     private void closeServerConnectionsIfNecessary(ProxyToServerConnection serverConnection,
-        HttpRequest currentHttpRequest, HttpResponse currentHttpResponse, HttpObject httpObject) {
+                                                   HttpRequest currentHttpRequest, HttpResponse currentHttpResponse, HttpObject httpObject) {
         boolean closeServerConnection =
             shouldCloseServerConnection(currentHttpRequest, currentHttpResponse, httpObject);
         if (closeServerConnection) {
@@ -1119,13 +962,6 @@ public class ClientToProxyConnection extends ProxyConnection<HttpRequest> {
         write(Unpooled.EMPTY_BUFFER);
     }
 
-    public InetSocketAddress getClientAddress() {
-        if (channel == null) {
-            return null;
-        }
-        return (InetSocketAddress)channel.remoteAddress();
-    }
-
     private boolean isOneToMany() {
         return currentRequestList != null && currentRequestList.size() > 1;
     }
@@ -1134,6 +970,17 @@ public class ClientToProxyConnection extends ProxyConnection<HttpRequest> {
         currentServerConnectionList = Lists.newArrayList();
         httpResponsePairList = Lists.newArrayList();
         currentRequestList = Lists.newArrayList();
+    }
+
+    private void clearServerConnection(ProxyToServerConnection proxyToServerConnection) {
+        if (!CollectionUtils.isEmpty(oneToOneServerConnectionsByHostAndPort) &&
+                oneToOneServerConnectionsByHostAndPort.containsKey(proxyToServerConnection.getServerHostAndPort())) {
+            oneToOneServerConnectionsByHostAndPort.remove(proxyToServerConnection.getServerHostAndPort());
+        }
+        if (!CollectionUtils.isEmpty(oneToManyServerConnectionsByHostAndPort) &&
+                oneToManyServerConnectionsByHostAndPort.containsKey(proxyToServerConnection.getServerHostAndPort())) {
+            oneToManyServerConnectionsByHostAndPort.remove(proxyToServerConnection.getServerHostAndPort());
+        }
     }
 
 }
