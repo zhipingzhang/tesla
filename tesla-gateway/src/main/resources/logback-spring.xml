@@ -41,9 +41,23 @@
         </encoder>
     </appender>
 
+    <!-- 异步输出 -->
+    <appender name="ASYNC_INFO_FILE" class="ch.qos.logback.classic.AsyncAppender">
+        <discardingThreshold>0</discardingThreshold>
+        <queueSize>2560</queueSize>
+        <appender-ref ref="SYSTEM_INFO_FILE" />
+    </appender>
+
+    <!-- 异步输出 -->
+    <appender name="ASYNC_CONSOLE" class="ch.qos.logback.classic.AsyncAppender">
+        <discardingThreshold>0</discardingThreshold>
+        <queueSize>2560</queueSize>
+        <appender-ref ref="CONSOLE" />
+    </appender>
+
     <root level="INFO">
-        <appender-ref ref="CONSOLE"/>
-        <appender-ref ref="SYSTEM_ERROR_FILE"/>
-        <appender-ref ref="SYSTEM_INFO_FILE"/>
+        <appender-ref ref="ASYNC_CONSOLE" />
+        <appender-ref ref="SYSTEM_ERROR_FILE" />
+        <appender-ref ref="ASYNC_INFO_FILE" />
     </root>
 </configuration>
